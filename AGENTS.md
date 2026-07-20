@@ -433,3 +433,27 @@ Every patch must be **atomic and production-safe**.
 * **No transitional states** — no placeholders, incomplete refactors, or temporary inconsistencies.
 
 **Invariant:** After any single patch, the repository remains fully functional and buildable.
+
+## Cursor Cloud specific instructions
+
+Durable, non-obvious notes for running/testing Telemt in the Cursor Cloud VM. Standard commands live in `README.md` (build/run) and `.github/workflows/check.yml` (fmt/clippy/test/udeps); prefer those, and only the caveats below are Telemt-specific gotchas.
+
+### Toolchain
+- Telemt is `edition = "2024"` and uses `let`-chains, so it requires a recent stable Rust (>= 1.88). The base VM image ships an older `rustc` that cannot compile it; the startup update script upgrades the `stable` toolchain and sets it as default, so a fresh session is ready to build.
+
+### Build / lint / test
+- For day-to-day dev use the debug profile: `cargo build`. Avoid `cargo build --release` unless needed — the release profile is `lto = "fat"` + `codegen-units = 1` and is very slow.
+- This crate is a **binary only (no lib target)**. `cargo test --lib ...` fails with "no library targets found". Use `cargo test` (all targets) or `cargo test --bin telemt <filter>` (e.g. `cargo test --bin telemt api::config_edit`).
+- Lint matches CI: `cargo clippy -j "$(nproc)" -- --cap-lints warn`. Clippy currently emits many warnings but they are capped to `warn` and do not fail.
+
+### Running the proxy
+- Run with an explicit config path: `./target/debug/telemt <path/to/config.toml>`.
+- Binding `server.port = 443` (and low ports generally) needs root/CAP_NET_BIND_SERVICE. For local dev set a high `server.port` (e.g. `8443`) so it runs as an unprivileged user.
+- Telemt writes runtime state files (e.g. `beobachten.txt` for TLS-fingerprint retention) into its current working directory. Run it from a scratch dir, or expect that file to appear in CWD; it is not meant to be committed.
+- Startup does outbound STUN + Telegram DC connectivity probes (~6s). Outbound network is available in the VM, so this succeeds; it is not required for the control API to come up.
+
+### Control API (`[server.api]`)
+- The HTTP control plane binds at `[server.api].listen` (default `127.0.0.1:9091`), independent of the data-plane proxy port.
+- `whitelist` defaults to loopback only, and when `auth_header` is set every request must send an exact `Authorization: <value>` header (missing/wrong -> `401`). Test with `curl -H "Authorization: <token>" http://127.0.0.1:9091/v1/health`.
+- Config-mutating endpoints (`PATCH /v1/config`, users API) rewrite `config.toml` via atomic `tmp + rename`, so the config must live in a **writable directory** (not a single read-only bind-mount). Writes re-serialize touched `[server]`/section tables with all default fields expanded — this is expected, not corruption.
+
